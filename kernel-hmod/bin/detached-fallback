@@ -38,6 +38,7 @@ memboot(){
   sync
   cd /
   umount -a -r 2>/dev/null
+  exec >/dev/null 2>&1
   disableUsbDevice
   kexec -e
   while :;do sleep 1;:;done
@@ -49,6 +50,7 @@ reboot_kexec(){
     shift
   else
     bootimg="$rootfs/boot/boot.img"
+    [ -f "$bootimg" ] || bootimg="$installpath/boot/boot.img"
     if [ ! -f "$bootimg" ]; then
       bootimg="$temppath/boot.img"
       readBoot2 > "$bootimg" || return 1
