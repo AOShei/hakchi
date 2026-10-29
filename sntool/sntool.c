@@ -18,6 +18,7 @@
 #include <bootimg.h>
 #include <include/portable_endian.h>
 #include "sha.h"
+#include "sunxi_part.h"
 
 // #########################################################################
 
@@ -1197,6 +1198,23 @@ int main(int argc,const char*argv[])
             else
                 ret+=sunxi_flash(cmd,offs,size,in0);
             continue;
+        }
+        if(strcmp(argv[i],"isRecovery")==0)
+        {
+            ret+=sp_isRecovery();
+            continue;
+        }
+        if(strcmp(argv[i],"ismd")==0)
+        {
+            ret+=sp_ismd();
+            continue;
+        }
+        if(strcmp(argv[i],"mdui")==0)
+            continue;
+        if((strcmp(argv[i],"sunxi_part")==0)||(strcmp(argv[i],"sunxi-part")==0))
+        {
+            ret+=sunxi_part(argc-i-1,argv+i+1);
+            break;
         }
         if((strcmp(argv[i],"devmem")==0)||(strcmp(argv[i],"devmem-write")==0))
         {
