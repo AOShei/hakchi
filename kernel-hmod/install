@@ -1,6 +1,6 @@
 #!/bin/sh
 # if no kexec, abort
-(uname -r | grep -qF madmonkey) || return 1
+(uname -r | grep -qE "madmonkey|cartload") || return 1
 
 source_base "./etc/preinit.d"
 copy "./bin/" "$rootfs/bin/"
