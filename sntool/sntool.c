@@ -942,16 +942,8 @@ int sunxi_flash_ioctl(uint32_t cmd,uint32_t offs,uint32_t size,FILE*f)
                 }
                 part=(size<sector_size)?size:sector_size;
             }
-            if(cmd==read_boot1)
-            {
-                if((size==part)&&isNandInfo(buffer+size))
-                {
-                    ubcsum+=stamp_value(buffer+size)-ubsum(buffer+size);
-                    ubcsum-=ubsum(buffer+size);
-                    size+=ubsize(buffer+size);
-                    part=(size<sector_size)?size:sector_size;
-                }
-            }
+            // read_boot1 gives u-boot alone, not the boot-info after it: hakchi's flashBoot
+            // compares it with the uboot.bin it flashed.
             if((cmd==read_boot0)||(cmd==read_boot1))
             {
                 const uint32_t*data32=(const uint32_t*)(buffer+skip);
