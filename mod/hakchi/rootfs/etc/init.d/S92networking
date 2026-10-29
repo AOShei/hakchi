@@ -2,27 +2,47 @@
 source /etc/preinit
 script_init
 
+if [ "$cfg_wood" = "y" ]; then
+  exec 1>>/var/log/networking.log 2>&1
+  [ "$#" -gt 1 ] && echo "$(basename "$0") ${1+"$@"}"
+fi
+
 interfaces="/etc/network/interfaces"
 
+interfaceUp(){
+  ifaceDown "$1" || return 0
+  [ -f "$interfaces.d/$1" ] || return 0
+  local i
+  for i in . . . . . . . . .; do
+    ifup "$1" -i "$interfaces.d/$1" && return 0
+  done
+}
+
+interfaceDown(){
+  [ -f "$interfaces.d/$1" ] && ifdown "$1" -i "$interfaces.d/$1" 2>/dev/null
+  ip link set "$1" down 2>/dev/null
+}
+
 start(){
-  if [ "$(usbMode)" != "host" ]; then
+  if ! haveUsbBus; then
     echo "usbMode: $(usbMode)"
     exit 1
   fi
 
   ifup -a
   for i in $(ls "$interfaces.d"); do
-    ifaceDown "$i" && ifup "$i" -i "$interfaces.d/$i" &
+    interfaceUp "$i" &
   done
 }
 
 stop(){
   for i in $(ls -r "$interfaces.d"); do
-    ifdown "$i" -i "$interfaces.d/$i" 2>/dev/null
-    ip link set "$i" down 2>/dev/null
+    interfaceDown "$i" &
   done
+  wait
   ifdown -a
   ip link set lo down
+  killall udhcpc 2>/dev/null
 }
 
 restart(){
@@ -42,14 +62,21 @@ case "$1" in
   ;;
   udev)
     ifaceUp "lo" || exit 0
-    [ "$(usbMode)" = "host" ] || exit 1
-    local self="$(readlink -f "$0")"
-    echo "\"$self\" udev-detached" >> "/var/exec.flag"
+    haveUsbBus || exit 1
+    self="$(readlink -f "$0")"
+    echo "\"$self\" udev-detached-$ACTION $INTERFACE" >> "/var/exec.flag"
   ;;
-  udev-detached)
-    [ "$(usbMode)" = "host" ] || exit 1
-    sleep 2
+  udev-detached|udev-detached-)
+    haveUsbBus || exit 1
     restart
+  ;;
+  udev-detached-add)
+    haveUsbBus || exit 1
+    interfaceUp "$2"
+  ;;
+  udev-detached-remove)
+    haveUsbBus || exit 1
+    interfaceDown "$2"
   ;;
   *)
     echo "Usage: $(basename "$0") {start|stop|status|restart}"

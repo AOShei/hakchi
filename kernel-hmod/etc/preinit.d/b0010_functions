@@ -1,0 +1,680 @@
+#!/bin/sh
+
+showBanner(){
+  echo "
+$modname $hakchiVersion by madmonkey
+
+Special thanks to all of the contributors including: $(shuf /etc/contributors | xargs | sed 's/ /, /g') and anyone else I may have forgotten
+" | fold -s
+}
+
+squashDevice(){
+  echo "$(mount | grep -F "$squashfs" | head -n1 | awk '{print $1}')"
+}
+
+umount_if(){
+  if [ -b "$1" ]; then
+    mount | grep -qF "$1" || return 0
+  else
+    mountpoint -q "$1" || return 0
+  fi
+  umount "$1" && return 0
+  umount -rf "$1"
+}
+
+umountSquash(){
+  umount_if "$squashfs"
+}
+
+mountSquash(){
+  [ -d "$(dirname "$squashfs")" ] || return 1
+  umountSquash || return 1
+  mountpoint -q "$mountpoint" || return 1
+  mkdir -p "$squashfs"
+  mount | grep -qE 'rootfs on .* type overlayfs' && umount "$mountpoint"
+  mount -o bind,ro "$mountpoint" "$squashfs" || return 1
+}
+
+mount_base(){
+  mkdir -p "$mountpoint/var"
+  mountpoint -q "$mountpoint/var" || mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$mountpoint/var" || return 1
+  mountSquash
+  mkdir -p "$mountpoint/var/lib"
+  mountpoint -q "$mountpoint/var/lib" || mount -o defaults,nosuid,nodev,noatime "/dev/nandc" "$mountpoint/var/lib"
+  if [ -f "$mountpoint/var/lib/uImage" ]; then
+    umount_if "$mountpoint/var/lib"
+    mount -o defaults,nosuid,nodev,noatime "/dev/nande" "$mountpoint/var/lib"
+  fi
+}
+
+mount_base_ro(){
+  mkdir -p "$mountpoint/var"
+  mountpoint -q "$mountpoint/var" || mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$mountpoint/var" || return 1
+  mountSquash
+  mkdir -p "$mountpoint/var/lib"
+  mountpoint -q "$mountpoint/var/lib" || mount -o defaults,nosuid,nodev,noatime,ro "/dev/nandc" "$mountpoint/var/lib"
+  if [ -f "$mountpoint/var/lib/uImage" ]; then
+    umount_if "$mountpoint/var/lib"
+    mount -o defaults,nosuid,nodev,noatime,ro "/dev/nande" "$mountpoint/var/lib"
+  fi
+}
+
+umount_base(){
+  sync
+  umountSquash
+  umount_if "$mountpoint/var/lib"
+  umount_if "$mountpoint/var"
+}
+
+reload_nand(){
+  local mnand="/lib/modules-ramfs/kernel/drivers/block/nand/nand.ko"
+  [ -f "$mnand" ] || return 1
+  umount_base
+  umount_if "$mountpoint"
+  [ -b "/dev/mapper/root-crypt" ] && cryptsetup close root-crypt
+  rmmod nand || return 1
+  insmod "$mnand"
+}
+
+remove_old(){
+  [ -d "$1" ] || return 1
+  [ -f "$modpath/script/removed" ] || return 0
+  local basepath="$1"
+  source "$modpath/script/removed"
+}
+
+mod_repair_etc(){
+  [ -d "$rootfs" ] || return 0
+  remove_old "$rootfs"
+
+  local etc="$temppath/etc"
+  rm -rf "$etc"
+  mkdir -p "$etc"
+#  copy "$mountpoint/etc/" "$etc/"
+  if [ "$1" == "full" ]; then
+    rm -f "$modpath/rootfs/etc/preinit.d/p0000_config"
+    copy "$modpath/rootfs/etc/" "$etc/"
+  else
+    copy "$rootfs/etc/inittab" "$etc/inittab"
+  fi
+  copy "$etc/" "$rootfs/etc/"
+  rm -rf "$etc"
+  mkdir -p "$rootfs/root"
+}
+
+mount_move(){
+  local tmpmount="/$2"
+  if [ "$1" == "l" ]; then
+    mountpoint -q "$mountpoint$tmpmount" || return 1
+    mkdir -p "$tmpmount"
+    mount --move "$mountpoint$tmpmount" "$tmpmount"
+  else
+    mountpoint -q "$tmpmount" || return 1
+    mount --move "$tmpmount" "$mountpoint$tmpmount"
+    rmdir --ignore-fail-on-non-empty "$tmpmount"
+  fi
+}
+
+remount_root(){
+  mount_move l media
+  mount_move l var
+
+  stopTask decodepng
+  stopTask aplay
+  if mountpoint -q "$mountpoint"; then
+    umount "$mountpoint" || (mkdir -p "/var/fuckup" && mount --move "$mountpoint" "/var/fuckup")
+  fi
+
+  local loopfile="/var${1##$mountpoint/var}"
+  [ -f "$loopfile" ] || loopfile="/media${1##$mountpoint/media}"
+  if ! mount -o loop,ro,noatime "$loopfile" "$mountpoint"; then
+    local preinitf="/${preinit##$mountpoint/}"
+    local preinit="$preinitf"
+    cfg_firmware="_nand_"
+    save_config
+    shutdown
+  fi
+
+  mount_move r var
+  mount_move r media
+}
+
+checkFirmware(){
+  [ -f "$1" ] || [ -b "$1" ] || return 1
+  [ "$(hexdump -e '1/4 "%u"' -s 0 -n 4 "$1")" == "1936814952" ] || return 1
+  return 0
+}
+
+nandbUnlocked(){
+  checkFirmware "/dev/mapper/root-crypt" || checkFirmware "/dev/nandb"
+}
+
+currentFirmware(){
+  local firmware="$(losetup -a | grep -F "$(squashDevice)" | head -n1 | awk '{print $3}')"
+  if ! [ -z "$firmware" ]; then
+    local fdir="$(dirname "$firmware")"
+    local fnam="$(basename "$firmware")"
+    firmware="$(find "$fdir" -name "${fnam}*" | head -n1)"
+    echo "$firmware"
+    return 0
+  fi
+  if nandbUnlocked; then
+    echo "_nand_"
+    return 0
+  fi
+  if squashDevice | grep -qF "/dev/nand"; then
+    echo "_nand_"
+    return 0
+  fi
+  return 1
+}
+
+loadFirmware(){
+  [ -z "$(mount | grep -F loop0)" ] || return 1
+
+  local firmware="$mountpoint$cfg_firmware"
+  if ! checkFirmware "$firmware"; then
+    [ "$cfg_firmware" == "auto" ] || return 0
+    [ -d "$extfirmwarepath" ] && \
+    firmware="$(find "$extfirmwarepath/" -type f -name "*.hsqs" | sort | head -n1)"
+    if ! checkFirmware "$firmware"; then
+      [ -d "$firmwarepath" ] && \
+      firmware="$(find "$firmwarepath/" -type f -name "*.hsqs" | sort | head -n1)"
+    fi
+  fi
+  checkFirmware "$firmware" || return 0
+
+  umountSquash
+  remount_root "$firmware"
+  [ -b "/dev/mapper/root-crypt" ] && cryptsetup close root-crypt
+  mountSquash
+}
+
+shutdown(){
+  echo "The system is going down NOW!"
+  sync
+  cd /
+  umount -a -r 2>/dev/null
+  umount -a -r 2>/dev/null
+  poweroff -f
+  while :;do sleep 1;:;done
+}
+
+reboot(){
+  echo "Restarting system."
+#  reboot_kexec
+  sync
+  cd /
+  umount -a -r 2>/dev/null
+  /bin/busybox reboot -f
+  while :;do sleep 1;:;done
+}
+
+early_getty(){
+  [ -d "$modpath/transfer" ] && cd "$modpath/transfer" || cd "$temppath"
+  /bin/getty -ni 115200 ttyS0 -l /bin/sh
+  cd - 1>/dev/null
+}
+
+copy(){
+  local src="$1";shift
+  local dst="$1";shift
+  # we must create target directory
+  local dirname="$(dirname "$dst")"
+  mkdir -p "$dirname"
+  rsync -ac "$src" "$dst" ${1+"$@"}
+}
+
+copy_mask(){
+  # this function is unsafe, avoid spaces in filenames!
+  local src="$1";shift
+  local dst="$1";shift
+  # we must create target directory
+  local dirname="$(dirname "$dst")"
+  mkdir -p "$dirname"
+  rsync -ac $src "$dst" ${1+"$@"}
+}
+
+tmpcopy(){
+  local tmpc="$temppath/c$(rand).tmp"
+  cat > "$tmpc"
+  copy "$tmpc" "$1"
+  rm -f "$tmpc"
+}
+
+restore(){
+  if mountpoint -q "$squashfs" && [ -e "$squashfs$1" ]; then
+    copy "$squashfs$1" "$rootfs$1"
+  else
+    copy "$mountpoint$1" "$rootfs$1"
+  fi
+}
+
+mount_bind(){
+  if mountpoint -q "$2"; then
+    umount "$2" || umount -f "$2"
+  else
+    umount "$2" 2>/dev/null
+  fi
+  mount -o bind "$1" "$2"
+}
+
+overmount(){
+  local force="false"
+  if [ "$1" = "-f" ]; then
+    shift
+    force="true"
+  fi
+  if [ "$#" == "1" ]; then
+    $force || return 0 #overlayfs
+    echo "overmounting $1"
+    mount_bind "$rootfs$1" "$mountpoint$1" && return 0
+  fi
+  if [ "$#" == "2" ]; then
+    echo "overmounting $1 on $2"
+    mount_bind "$rootfs$1" "$mountpoint$2" && return 0
+  fi
+  echo "overmounting failed"
+  return 1
+}
+
+containsGames(){
+  [ -d "$1" ] || return 1
+  [ -z "$(cd "$1";ls CLV-* 2>/dev/null)" ] && return 1
+  return 0
+}
+
+linkGames(){
+  local games="$mountpoint/media/$modname/games${1##$installpath/games}"
+  [ -d "$games" ] || games="$installpath/games${1##$rootfs$gamepath}"
+  [ -d "$games" ] || games="$1"
+  [ -d "$games" ] || return 0
+  games="${games##$mountpoint}"
+  rm -f "$mountpoint/var/games"
+  ln -nsf -T "$games" "$mountpoint/var/games"
+  return 0
+}
+
+softwareCheck(){
+  sftype=""
+  sfregion=""
+
+  if [ -d "$squashfs/etc/clover" ]; then
+    sftype="nes"
+    sfregion="usa"
+    [ "$(cat "$squashfs/etc/clover/boardtype")" == "dp-shvc" ] && sftype="snes"
+    grep -qF "dp-hvcj" "$squashfs/etc/issue" && sftype="hvcj"
+    [ "$(cat "$squashfs/etc/clover/REGION")" == "JPN" ] && sfregion="jpn"
+    [ "$(cat "$squashfs/etc/clover/REGION")" == "EUR" ] && sfregion="eur"
+
+    local feck="$mountpoint$profilepath/home-menu/save/system-save.json"
+    if ! [ "$sftype" = "nes" ]; then
+      gamepath="/usr/share/games"
+      [ -f "$feck" ] && mv -f "$feck" "$feck.nes"
+      [ -d "$feck.snes" ] && rm -rf "$feck" && mv "$feck.snes" "$feck"
+    else
+      gamepath="/usr/share/games/nes/kachikachi"
+      [ -d "$feck" ] && rm -rf "$feck.snes" && mv "$feck" "$feck.snes"
+      [ -f "$feck.nes" ] && mv -f "$feck.nes" "$feck"
+    fi
+  fi
+
+  if [ -f "$squashfs/usr/game/version" ]; then
+    sftype="md"
+    sfregion="usa"
+    local ver="$(cat "$squashfs/usr/game/version")"
+    ver="${ver:4:2}"
+    [ "$ver" = "JP" ] && sfregion="jpn"
+    [ "$ver" = "EU" ] && sfregion="eur"
+    [ "$ver" = "AS" ] && sfregion="asia"
+  fi
+
+  mountpoint -q "$mountpoint/var/lib" || return 0
+  mkdir -p "$mountpoint$profilepath/$modname"
+
+  rm -f "$mountpoint/var/saves"
+  mkdir -p "$mountpoint$profilepath"
+  ln -nsf -T "$profilepath" "$mountpoint/var/saves"
+}
+
+repair_fonts(){
+  if [ "$sftype" == "nes" ]; then
+    mkdir -p "$1" || return 1
+    [ ! -f "$1/title.fnt" ] && (copy "$rootfs$gamepath/title.fnt" "$1/" || copy "$squashfs$gamepath/title.fnt" "$1/")
+    [ ! -f "$1/copyright.fnt" ] && (copy "$rootfs$gamepath/copyright.fnt" "$1/" || copy "$squashfs$gamepath/copyright.fnt" "$1/")
+  fi
+}
+
+checkGamepath(){
+  containsGames "$1" && echo "$1" && return 0
+  containsGames "$1/000" && echo "$1" && return 0
+  return 1
+}
+
+checkPath(){
+  [ -d "$1" ] && echo "$1" && return 0
+  return 1
+}
+
+findGameSyncStorage(){
+  checkPath "$mountpoint/media/$modname/games" && return 0
+  mkdir -p "$installpath/games"
+  checkPath "$installpath/games" && return 0
+  return 1
+}
+
+findGameStorage(){
+  checkGamepath "$mountpoint/media/$modname/games/$sftype-$sfregion" && return 0
+  checkGamepath "$mountpoint/media/$modname/games/$sftype" && return 0
+  checkGamepath "$mountpoint/media/$modname/games" && return 0
+
+  checkGamepath "$installpath/games/$sftype-$sfregion" && return 0
+  checkGamepath "$installpath/games/$sftype" && return 0
+  checkGamepath "$installpath/games" && return 0
+  return 1
+}
+
+bind_games(){
+  [ -z "$gamepath" ] && return 0
+  mount_bind "$1" "$2" || return 1
+  repair_fonts "$1"
+}
+
+overmount_games(){
+  local gameStorage="$(findGameStorage)" || return 0
+  local state_path="$mountpoint$profilepath/$modname"
+  local state_file="$state_path/menu"
+  local menu_code="$1"
+  [ -z "$1" ] && menu_code="000"
+  [ -z "$1" ] && [ -f "$state_file" ] && menu_code="$(cat "$state_file")"
+  if ! containsGames "$gameStorage/$menu_code"; then
+    menu_code="000"
+    containsGames "$gameStorage/$menu_code" || menu_code=""
+  fi
+  echo "menu code: $menu_code"
+  if containsGames "$gameStorage/$menu_code"; then
+    bind_games "$gameStorage/$menu_code" "$mountpoint/$gamepath" && \
+    linkGames "$gameStorage/$menu_code" && \
+    return 0
+  else
+    echo "no romz found at: $gameStorage/$menu_code"
+  fi
+  linkGames "$gamepath"
+  return 1
+}
+
+uilist(){
+  lsof -n | grep -F "/dev/fb0" | awk '{print $1}' | sort -u
+}
+
+uikill(){
+  [ -z "$1" ] && return 1
+  uilist | xargs -r kill -s "$1"
+}
+
+uistop(){
+  killall -s KILL clover-mcp 1>/dev/null 2>&1
+  sh "/etc/init.d/S99first_startup" stop 1>/dev/null 2>&1
+  uikill TERM
+}
+
+uistart(){
+  uistop
+  if [ -f "$squashfs/usr/game/m2engage" ]; then
+    sh "/etc/init.d/S99first_startup" start
+  else
+    sh "/etc/init.d/S81clover-mcp" start
+  fi
+}
+
+uipause(){
+  killall -s STOP m2engage 1>/dev/null 2>&1
+  uikill STOP
+}
+
+uiresume(){
+  uikill CONT
+  killall -s CONT m2engage 1>/dev/null 2>&1
+}
+
+gameover(){
+  if sntool isRecovery; then
+    shutdown
+  else
+    poweroff
+  fi
+}
+
+printSoftwareInfo(){
+  echo "software=$sftype"
+  echo "region=$sfregion"
+}
+
+stopTask(){
+  local tokill="false"
+  if [ "$1" = "-f" ]; then
+    tokill="true"
+    shift
+  fi
+  local pid="$(pidof "$1")"
+  [ -z "$pid" ] && return 0
+  "$tokill" && kill "$pid"
+  wait "$pid"
+}
+
+waitTask(){
+  local A="stopTask ${1+"$@"}"
+  trap "$A" EXIT
+}
+
+showImage(){
+  local image="$(eval echo "$1")"
+  [ -f "/.debug" ] && return 0
+  [ -f "$image" ] || image="$rootfs$1"
+  [ -f "$image" ] || image="$squashfs$1"
+  [ -f "$image" ] || return 1
+  decodepng "$image" > "/dev/fb0" &
+  waitTask decodepng
+  return 0
+}
+
+showDefaultImage(){
+  showImage "$modpath/rootfs/etc/$modname.png"
+}
+
+blank(){
+  dd status=none if=/dev/zero of=/dev/fb0 bs=$((1280*720)) count=$((4*2))
+}
+
+playSound(){
+  local wavfile="$(eval echo "$1")"
+  [ -f "$wavfile" ] || wavfile="$rootfs$1"
+  [ -f "$wavfile" ] || wavfile="$squashfs$1"
+  [ -f "$wavfile" ] || return 1
+  aplay -q "$wavfile" &
+  waitTask aplay
+  return 0
+}
+
+hwmon(){
+  cat "/sys/devices/virtual/hwmon/hwmon1/temp1_input"
+}
+
+usedBlockSpace(){
+  local path="$1"
+  [ ! -e "$path" ] && echo '0' && return 1
+  local line="$(df -k "$path" | tail -n1)"
+  local used="$(echo "$line" | awk '{print $3}')"
+  local available="$(echo "$line" | awk '{print $4}')"
+  local total="$(($used+$available))"
+  echo "$used $total"
+}
+
+freeBlockSpace(){
+  local path="$1"
+  [ ! -e "$path" ] && echo '0' && return 1
+  df -k "$path" | tail -n1 | awk '{print $4}'
+}
+
+usedSpace(){
+# Warning: SLOW
+  local path="$1"
+  [ ! -e "$path" ] && echo '0' && return 1
+  du -ksx "$path" | awk '{print $1}'
+}
+
+freeSpace(){
+  freeBlockSpace ${1+"$@"}
+}
+
+getPath(){
+  case "$1" in
+    games*)
+      echo "$(findGameSyncStorage)${1#games}"
+      ;;
+    saves)
+      echo "$profilepath"
+      ;;
+    mods)
+      echo "$rootfs"
+      ;;
+    firmware)
+      echo "$firmwarepath"
+      ;;
+    *)
+      echo "Usage: $0 {games*|saves|mods|firmware}" 1>&2
+      echo "$rootfs"; return 1
+  esac
+  return 0
+}
+
+usedBy(){
+  if local tpath="$(getPath "$1")"; then
+    usedSpace "$tpath"
+  else
+    echo '0'; return 1
+  fi
+}
+
+freeFor(){
+  if local tpath="$(getPath "$1")"; then
+    case "$1" in
+      games*)
+        freeSpace "$(getPath games)"
+        ;;
+      *)
+        freeSpace "$tpath"
+    esac
+  else
+    echo '0'; return 1
+  fi
+}
+
+totalFor(){
+  echo "$(($(freeFor "$1")+$(usedBy "$1")))"
+}
+
+getScript(){
+  if [ -z "$1" ]; then
+    sntool devmem 0x43000000 $((128*1024)) | sunxi-fexc -q -I bin -O fex 2>/dev/null
+  else
+    sntool devmem 0x43000000 $((128*1024)) | sunxi-fexc -q -I bin -O fex 2>/dev/null 1>"$1"
+  fi
+}
+
+setScript(){
+  sunxi-fexc -q -I fex -O bin ${1+"$@"} 2>/dev/null | sntool devmem-write 0x43000000 $((128*1024))
+}
+
+hwid(){
+  sntool devmem 0x01c23800 32 | hexdump -e '1/4 "%.8x "' -n16 | xargs
+}
+
+mmcUsed(){
+  getScript | grep -qF 'sdc_used = 1'
+}
+
+versionData(){
+  local kernelVersion="$(uname -r)"
+  [ -z "$bootVersion" ] && local bootVersion="v1.0.0"
+  echo "# $(uname -a)"
+  set | grep -F "Version" | sort
+}
+
+createVersionFile(){
+  [ -d "$mountpoint/var" ] || return 1
+  local vfile="$mountpoint/var/version"
+  versionData > "$vfile"
+}
+
+loadVersionFile(){
+  local vfile="$mountpoint/var/version"
+  [ -f "$vfile" ] || return 1
+  source "$vfile"
+}
+
+ifaceUp(){
+  ifconfig | grep -qF "$1" && return 0
+  return 1
+}
+
+ifaceDown(){
+  ifconfig | grep -qF "$1" && return 1
+  ifconfig -a | grep -qF "$1" || return 1
+  return 0
+}
+
+getSquashfsGameList(){
+  [ -d "$squashfs$gamepath" ] || return 1
+  local xcode=""
+  local xxcode=""
+  find "$squashfs$gamepath" -maxdepth 1 -type d -name "CLV-*" | while read xcode; do
+    xxcode="$(basename "$xcode")"
+    grep -F "Name=" "$xcode/$xxcode.desktop" | sed "s%Name=%$xxcode : %g"
+  done | sort
+  return 0
+}
+
+waittimeout(){
+  local t="$1"
+  local wasted="0"
+  [ "$timeout" -eq "$timeout" ] 2>/dev/null || local timeout="30000"
+  [ "$t" -eq "$t" ] 2>/dev/null || t="$timeout"
+  [ "$t" -lt "$timeout" ] || t="$timeout"
+  while ! eval "$2"; do
+    [ "$t" -lt "100" ] && break
+    [ ! -z "$3" ] && echo "waiting for $3 ... $((t/1000))"
+    for i in $(seq 1 10); do
+      [ "$t" -lt "100" ] && break || usleep 100000
+      t="$((t-100))"; timeout="$((timeout-100))"
+      wasted="$((wasted+100))"
+      eval "$2" && break
+    done
+  done
+  [ ! -z "$3" ] && [ "$wasted" -gt "0" ] && [ "$cfg_wood" = "y" ] && echo "wasted ${wasted}ms waiting for $3"
+  eval "$2"
+}
+
+ismdPartitioning(){
+  sntool ismd && return 0
+  sunxi-part | grep -qF 'boot-res'
+}
+
+linkModules(){
+  local mod="lib/modules/$(uname -r)"
+#  [ -d "/$mod" ] && return 0
+  mkdir -p "$(dirname "$mod")"
+  [ -d "$rootfs/$mod" ] && ln -nsf -T "$rootfs/$mod" "/$mod" && return 0
+  [ -d "$squashfs/$mod" ] && ln -nsf -T "$squashfs/$mod" "/$mod" && return 0
+  [ -d "$mountpoint/$mod" ] && ln -nsf -T "$mountpoint/$mod" "/$mod" && return 0
+  ln -nsf -T "/lib/modules-ramfs" "/$mod"
+  [ -d "/$mod" ]
+}
+
+loadModules(){
+  linkModules || return 1
+  local m
+  for m in mali sd_mod usb_storage overlayfs evdev gpio_keys; do
+    modprobe -q "$m"
+  done 
+}

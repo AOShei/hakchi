@@ -1,0 +1,55 @@
+#!/bin/sh
+source /etc/preinit
+script_short_init
+
+UserMode()
+{
+  local ret
+  printf "User Mode:"
+  button-detection -t 6
+  ret=$?
+  if [ $ret = 1 ]; then
+    echo "start diagnosis program"
+    diag-test >/dev/null 2>&1 &
+  elif [ $ret = 2 ]; then
+    shutdown-detection 0
+  elif [ -x /etc/init.d/moon-game ]; then
+    /etc/init.d/moon-game start
+    /etc/init.d/watchdog_soft start
+  else
+    echo "start diagnosis program"
+    diag-test >/dev/null 2>&1 &
+  fi
+}
+
+start()
+{
+  [ -f "$squashfs/usr/game/m2engage" ] || exit 0
+  UserMode
+}
+
+stop()
+{
+#TODO  /etc/init.d/watchdog_soft stop
+  /etc/init.d/moon-game stop
+}
+
+restart() {
+  stop
+  start
+}
+
+case "$1" in
+  start)
+    start
+    ;;
+  stop)
+    stop
+    ;;
+  restart|reload)
+    restart
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+esac

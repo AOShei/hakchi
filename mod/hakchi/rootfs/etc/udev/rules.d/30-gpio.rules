@@ -1,0 +1,2 @@
+SUBSYSTEM=="input", ATTRS{name}=="gpio-keys", MODE="0666", ENV{ID_INPUT_KEYBOARD}="1"
+SUBSYSTEM=="input", ATTRS{name}=="sunxi-keyboard", MODE="0666", ENV{ID_INPUT_KEYBOARD}="1"

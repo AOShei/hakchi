@@ -3,7 +3,7 @@
 export cf_backup_dummy='n'
 export cf_backup='n'
 export cf_backup_nandc='n'
-export cf_chainload='y'
+export cf_chainload='n'
 export cf_install='n'
 export cf_memboot='n'
 export cf_shell='n'

@@ -19,3 +19,8 @@ if [ "$cfg_wood" = "y" ]; then
 fi
 
 echo "loading $modname"
+loadModules 2>/dev/null
+
+cpufreq="/sys/devices/system/cpu/cpu0/cpufreq"
+cat "$cpufreq/cpuinfo_boot_freq" > "$cpufreq/scaling_max_freq"
+unset cpufreq

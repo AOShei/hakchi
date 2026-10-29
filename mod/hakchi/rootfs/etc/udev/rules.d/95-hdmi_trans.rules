@@ -1,0 +1,1 @@
+ACTION=="change", KERNEL=="hdmi", SUBSYSTEM=="switch", ATTRS{state}=="1", RUN+="/usr/bin/hdmi_trans -m 1"

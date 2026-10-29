@@ -1,0 +1,230 @@
+#!/bin/sh
+
+getCmdLine(){
+  dd status=none "if=$1" bs=64 count=8 skip=1 | tr -d '\0' | tr ' ' '\n'
+  echo
+}
+
+getCmdLinePadded(){
+  cat "$1" | xargs
+  dd status=none conv=notrunc "if=/dev/zero" bs=64 count=8
+}
+
+setCmdLine(){
+  getCmdLinePadded "$2" | dd status=none conv=notrunc "of=$1" bs=64 count=8 seek=1
+}
+
+encodeKeyFile(){
+  local keyfile="/key-file"
+  [ -f "$keyfile" ] || keyfile="$rootfs/etc/key-file"
+  [ -f "$keyfile" ] || return 1
+  echo "$modname-key-file=base64:$(base64 "$keyfile")"
+}
+
+insertKeyFile(){
+  local cmdline="$temppath/cmdline"
+  getCmdLine "$1" | grep -Fv "${modname}-" > "$cmdline"
+  encodeKeyFile >> "$cmdline"
+  setCmdLine "$1" "$cmdline"
+  rm -f "$cmdline"
+}
+
+readBoot(){
+  local BN="$1";shift
+  [ "$BN" -eq "$BN" ] 2>/dev/null || return 1
+  sunxi-flash "read_boot$BN" ${1+"$@"}
+}
+
+readBoot0(){
+  readBoot 0 ${1+"$@"}
+}
+
+readBoot1(){
+  readBoot 1 ${1+"$@"}
+}
+
+readBoot2(){
+  readBoot 2 ${1+"$@"}
+}
+
+readBackup2(){
+  readBoot 2 68 ${1+"$@"}
+}
+
+isValidBootImage(){
+  [ -f "$1" ] || return 1
+  sntool check "$1" >/dev/null && return 0
+  echo "invalid image: $1" 1>&2
+  return 1
+}
+
+validBoot2f(){
+  isValidBootImage ${1+"$@"}
+}
+
+isValidBootImageNand(){
+  local BN="$1"
+  [ "$BN" -eq "$BN" ] 2>/dev/null || return 1
+  local offset="$2"
+  [ "$offset" -eq "$offset" ] 2>/dev/null || return 1
+  readBoot "$BN" "$offset" >/dev/null && return 0
+  echo "invalid image on nand at sector: $offset" 1>&2
+  return 1
+}
+
+validBoot2n(){
+  local offset="$1";shift
+  [ "$offset" -eq "$offset" ] 2>/dev/null || offset="30"
+  isValidBootImageNand 2 "$offset" ${1+"$@"}
+}
+
+flashBoot(){
+  local BN="$1"
+  [ "$BN" -eq "$BN" ] 2>/dev/null || return 1
+  local bootimg="$3"
+  local offset="$4"
+  [ "$offset" -eq "$offset" ] 2>/dev/null || offset="$2"
+  [ "$offset" -eq "$offset" ] 2>/dev/null || return 1
+  isValidBootImage "$bootimg" || return 1
+  sntool check -f "$bootimg" >/dev/null || return 1
+  local md5i="$(dd status=none bs=128K "if=$bootimg" | md5sum | awk '{print $1}')"
+  dd status=none bs=128K "if=$bootimg" | sunxi-flash "burn_boot$BN" "$offset"
+  isValidBootImageNand "$BN" "$offset" || dd status=none bs=128K "if=$bootimg" | sunxi-flash "burn_boot$BN" "$offset"
+  local md5f="$(readBoot "$BN" "$offset" | md5sum | awk '{print $1}')"
+  [ "$md5i" = "$md5f" ] && return 0
+  echo "flash md5 mismatch! $md5i($bootimg) != $md5f(flash+$offset)" 1>&2
+  return 1
+}
+
+flashBoot0(){
+  sunxi-flash burn_boot0 ${1+"$@"} || return 1
+  readBoot0 >/dev/null && return 0
+  echo "flash boot0 failed!" 1>&2
+  return 1
+}
+
+flashBoot1(){
+  flashBoot 1 8 ${1+"$@"}
+}
+
+flashBoot2(){
+  ismdPartitioning && return 1
+  flashBoot 2 30 ${1+"$@"}
+}
+
+isOriginalBoot2(){
+  validBoot2n || return 1
+  [ "$(sunxi-flash ramdisk | cpio -t 2>/dev/null | grep -F "$modname" | wc -l)" = "0" ] && return 0
+  return 1
+}
+
+haveBackup2(){
+  ismdPartitioning && return 0
+  validBoot2n 68
+}
+
+backupBoot2(){
+  haveBackup2 && return 0
+  isOriginalBoot2 || return 1
+  local bootimg="$temppath/boot.img"
+  readBoot2 > "$bootimg" || return 1
+  flashBoot2 "$bootimg" 68 || return 1
+  rm -f "$bootimg"
+}
+
+restoreBoot2(){
+  ismdPartitioning && return 0
+  isOriginalBoot2 && return 0
+  haveBackup2 || return 1
+  local bootimg="$temppath/boot.img"
+  readBackup2 > "$bootimg" || return 1
+  flashBoot2 "$bootimg" || return 1
+  rm -f "$bootimg"
+}
+
+installBoot2(){
+  backupBoot2
+  insertKeyFile "$1"
+  if [ -d "$rootfs/boot" ]; then
+    copy "$1" "$rootfs/boot/boot.img"
+    return $?
+  fi
+  if [ -d "$installpath/boot" ]; then
+    copy "$1" "$installpath/boot/boot.img"
+    return $?
+  fi
+  flashBoot2 ${1+"$@"}
+}
+
+memboot(){
+  local bootimg="$1";shift
+  isValidBootImage "$bootimg" || return 1
+  local mbHost=""; [ "$(usbMode)" = "host" ] && mbHost="$modname-usb-host"
+  local cmdline="$(getCmdLine "$bootimg" | (grep -v "$modname-*shell"; echo "$@"; echo "$modname-chainload $mbHost") | xargs)"
+  echo "memboot $bootimg $cmdline"
+  kexec -l -t zImage "$bootimg" "--command-line=$cmdline" --atags || return 1
+  trap ":" HUP TERM
+  killall -q clovershell
+  service inetd stop
+  uistop
+  sync
+  cd /
+  umount -a -r 2>/dev/null
+  disableUsbDevice
+  kexec -e
+  while :;do sleep 1;:;done
+}
+
+reboot_kexec(){
+  local bootimg="$1"
+  if [ -f "$bootimg" ]; then
+    shift
+  else
+    bootimg="$rootfs/boot/boot.img"
+    [ -f "$bootimg" ] || bootimg="$installpath/boot/boot.img"
+    if [ ! -f "$bootimg" ]; then
+      bootimg="$temppath/boot.img"
+      readBoot2 > "$bootimg" || return 1
+    fi
+  fi
+  memboot "$bootimg" ${1+"$@"}
+}
+
+clovershellActive(){
+  [ "$cf_clovershell" = "y" ] && return 0
+  (ps | grep -vF grep;pack_list) | grep -qF clovershell
+}
+
+recovery(){
+  local bootimg="$1"
+  [ -f "$bootimg" ] && shift || bootimg=""
+  local rshell="$modname-shell"
+  clovershellActive && rshell="$modname-clovershell"
+  echo "$*" | grep -q "$modname-*shell" && rshell=""
+  reboot_kexec "$bootimg" "$rshell" ${1+"$@"}
+}
+
+needKeyFile(){
+  return 1
+  [ -z "$mountpoint" ] && return 1
+  nandbUnlocked && return 1
+  return 0
+}
+
+getBackup2(){
+  ismdPartitioning && return 1
+  needKeyFile && return 1
+  if haveBackup2; then
+    readBackup2
+  else
+    isOriginalBoot2 || return 1
+    readBoot2
+  fi
+}
+
+bootBackup2(){
+  local bootimg="$temppath/boot.img"
+  getBackup2 > "$bootimg" && memboot "$bootimg"
+  rm -f "$bootimg"
+  return 1
+}

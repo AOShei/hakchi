@@ -1,0 +1,75 @@
+#!/bin/sh
+source /etc/preinit
+script_init
+
+PROC="m2engage"
+GAME_HOME="/usr/game"
+EXIT_FILE="/tmp/.game.exit"
+LOG_FILE="/tmp/.game.log"
+
+launchRA(){
+  [ -x "/bin/retroarch" ] || return 0
+  local savedir="$profilepath/libretro"
+  mkdir -p "$savedir"
+  cd "$savedir"
+  false
+  while ! [ $? -eq 0 ]; do
+    HOME="/etc/libretro" "/bin/retroarch" -c "/etc/libretro/retroarch.cfg"
+  done
+}
+
+start()
+{
+  if [ -x "${GAME_HOME}/${PROC}" ]; then
+    echo "start game"
+  else
+    exit 1
+  fi
+  if sntool ismd && ! sntool mdui && [ "$sftype" = "md" ]; then
+    launchRA
+  fi
+  rm -f "${EXIT_FILE}"
+  [ -f "${EXIT_FILE}" ] && exit 1
+  echo "start game app" >> "${LOG_FILE}"
+  ulimit -s 1024
+  cd "${GAME_HOME}" && PATH="${GAME_HOME}:${PATH}" "${PROC}" >> "${LOG_FILE}" 2>&1
+  local res=$?
+#  shutdown-detection $res
+  shutdown-detection 0
+  echo "exit game app $res" >> "${LOG_FILE}"
+}
+
+stop()
+{
+  echo "stop game app" >> "${LOG_FILE}"
+  touch "${EXIT_FILE}"
+  trap ":" TERM
+  pkill -f "moon-game"
+  killall "${PROC}"
+  pkill -9 -f "wait_for_moon_game_start.sh"
+  pkill -9 -f "game_hangup_detect.sh"
+  pkill -9 -f "diag-test"
+  pkill -9 -f "shutdown-detection"
+  pkill -9 -f "m2engage"
+}
+
+restart()
+{
+  stop
+  start &
+}
+
+case "$1" in
+  start)
+    start &
+    ;;
+  stop)
+    stop
+    ;;
+  restart|reload)
+    restart
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+esac

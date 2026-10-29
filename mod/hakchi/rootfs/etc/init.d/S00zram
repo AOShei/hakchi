@@ -14,7 +14,7 @@ start(){
   local mem_total_kb="$(grep ^MemTotal /proc/meminfo | awk '{print $2}')"
   local mem_total="$((mem_total_kb * 1024))"
   lmod zsmalloc 2>/dev/null
-  lmod zram "num_devices=$num_cpus" || return 1
+  lmod zram "num_devices=$num_cpus" 2>/dev/null || return 1
   # initialize the devices, set total size to 1/2 RAM
   local disksize="$((mem_total / 2 / num_cpus))"
   for i in $(seq 0 "$((num_cpus - 1))"); do

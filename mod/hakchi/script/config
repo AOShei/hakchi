@@ -23,6 +23,9 @@ fi
 [ "$cf_shell" = "y" ] && cf_clovershell='n'
 [ "$cf_memboot" = "y" ] && cf_chainload='n'
 
+# disable
+cf_clovershell='n'
+
 rm -f "$modpath/config"
 for cf in $(set | grep -F cf_ | sort); do
   echo "export $cf" >> "$modpath/config"

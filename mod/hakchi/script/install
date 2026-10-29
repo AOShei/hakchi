@@ -1,13 +1,29 @@
 #!/bin/sh
 
 mod_uninstall(){
+  mount_base
+  if [ "$1" = "reset" ]; then
+    rm -rf "$installpath"
+    return 0
+  fi
   echo "uninstalling $modname..."
+  if [ -f "$1" ]; then
+    flashBoot2 "$1"
+  else
+    restoreBoot2
+  fi
+  local res=$?
+  echo "default" | sunxi-flash burn_boot1
   rm -rf "$installpath"
+  sunxi-part shrink >/dev/null
   echo "done."
+  return $res
   shutdown
 }
 
 mod_repair(){
+  sunxi-part tune >/dev/null
+  mount_base
   local packName=""
   while read -r packName; do
     pack_uninstall "$packName"
@@ -16,7 +32,7 @@ mod_repair(){
   local bin="$temppath/bin"
   rm -rf "$bin"
   mkdir -p "$bin"
-  copy "$mountpoint/bin/" "$bin/"
+#  copy "$mountpoint/bin/" "$bin/"
   copy "/bin/" "$bin/"
   copy "$modpath/rootfs/bin/" "$bin/"
   [ -f "/sbin/cryptsetup" ] && copy "/sbin/cryptsetup" "$bin/cryptsetup"
@@ -31,6 +47,16 @@ mod_repair(){
   copy "$modpath/rootfs/" "$rootfs/"
 
   mod_repair_etc full
+  if ! [ -h "$cloverpath/backgrounds" ]; then
+    rmdir "$cloverpath/backgrounds" 2>/dev/null
+    if [ -d "$cloverpath/backgrounds" ]; then
+      mkdir -p "$rootfs/usr/share/backgrounds"
+      cd "$cloverpath/backgrounds" && mv -f * "$rootfs/usr/share/backgrounds"
+      rmdir "$cloverpath/backgrounds"
+    fi
+    mkdir -p "$cloverpath"
+    ln -nsf -T "/usr/share/backgrounds" "$cloverpath/backgrounds"
+  fi
   find "$preinit.d/" -type f -name "*.tmp" -delete
   cd /
 }

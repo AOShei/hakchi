@@ -1,5 +1,6 @@
 #!/bin/sh
 
 if [ -d "$preinit.d" ] && set | grep -qF "cfg_"; then
-  set | grep -F "cfg_" | sort | tmpcopy "$preinit.d/p0000_config"
+  set | grep -F "cfg_" | sort | tmpcopy "$preinit.d/p0000_config" 2>/dev/null
+  [ -d "/newroot" ] && mount -o remount "/newroot" || mount -o remount "/"
 fi

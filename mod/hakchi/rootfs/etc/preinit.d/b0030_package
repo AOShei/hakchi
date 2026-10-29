@@ -109,7 +109,7 @@ pack_uninstall(){
     fi
   fi
   cd /
-  rmdir --ignore-fail-on-non-empty "$installpath/hmod"
+  [ -d "$installpath/hmod" ] && rmdir --ignore-fail-on-non-empty "$installpath/hmod"
 }
 
 packs_install(){

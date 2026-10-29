@@ -6,6 +6,15 @@ backup_one(){
   dd "if=/dev/$1" bs=128K | gzip > "$backuppath/$1.gz"
 }
 
+backup_nandb_name(){
+  local nandb="/dev/mapper/root-crypt"
+  checkFirmware "$nandb" || nandb="/dev/nandb"
+  checkFirmware "$nandb" || return 1
+  cd "$mountpoint/etc/clover" || return 1
+  local nandb_filename="$(cat boardtype)-$(cat VERSION)-$(cat REGION).hsqs"
+  echo "$nandb_filename" | tr '[:upper:]' '[:lower:]'
+}
+
 backup_nandb(){
   local nandb="/dev/mapper/root-crypt"
   checkFirmware "$nandb" || nandb="/dev/nandb"

@@ -29,7 +29,7 @@ reflashSquashfs(){
   fi
 
   if [ -x "/bin/mke2fs" ]; then
-    yes | mke2fs -t ext4 -L data -b 4K -E stripe-width=32 -O ^huge_file,^metadata_csum "/dev/nandc"
+    yes | mke2fs -t ext4 -L data -b 4K -m 0 -J size=4 -E stripe-width=32 -O ^huge_file,^metadata_csum,^64bit "/dev/nandc"
   fi
 
   mount_base

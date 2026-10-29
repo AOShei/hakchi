@@ -57,6 +57,9 @@ save_config(){
 
 script_init(){
   source_base
+  if sntool isRecovery; then
+    source "$modpath/script/install"
+  fi
   source_config
   softwareCheck
 }

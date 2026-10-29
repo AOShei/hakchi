@@ -1,0 +1,41 @@
+#!/bin/sh -e
+# Wrapper for m2engage
+# You can add extra command line arguments to all games at once
+# using "cfg_m2engage_extra_args" variable in p0000_config
+
+extractRom(){
+  local filebase="$(basename "$filename")"
+  local extension="${filebase##*.}"
+  if [ ! -f "$filename" ] && [ -f "$tmppath/$filename" ]; then
+    filename="$(readlink -f "$tmppath/$filename")"
+    return 0
+  fi
+  rm -rf "$tmppath"
+  mkdir -p "$tmppath"
+  if [ "$extension" = "7z" ]; then
+    cd "$tmppath"
+    tiny7zx x "$filename"
+    filename="$(ls|head -n1)"
+    mv "$filename" "rom.${filename##*.}"
+    filename="$tmppath/rom.${filename##*.}"
+    cd - >/dev/null
+  fi
+  if [ "$extension" = "gz" ]; then
+    filebase="$(basename "$filebase" ".gz")"
+    extension="${filebase##*.}"
+    filename="$tmppath/rom.$extension"
+    gunzip -c "$1" > "$filename"
+  fi
+} >/dev/null 2>&1
+
+tmppath="/tmp/rom"
+filename="$(readlink -f "$1" || echo "$1")"
+shift
+extractRom
+
+set +e
+[ -f "/tmp/m2engage" ] && chmod +x "/tmp/m2engage" && exec "/tmp/m2engage" "$filename" ${1+"@"} $cfg_m2engage_extra_args
+[ -x "/bin/genesis-plus-gx" ] && exec "/bin/genesis-plus-gx" "$filename" ${1+"$@"}
+[ -x "/bin/picodrive" ] && exec "/bin/picodrive" "$filename" ${1+"$@"}
+rm -rf "$tmppath"
+exit 1

@@ -2,10 +2,17 @@
 
 createVersionFile
 
-overmount -f "/bin"
-overmount -f "/etc"
-overmount -f "/root"
+#overmount -f "/bin"
+#overmount -f "/etc"
+#overmount -f "/root"
 
-if ! clovershellActive; then
-  overmount "/etc/init.d/S92rndis" "/etc/init.d/S90usb-gadget"
+if [ -f "$mountpoint/etc/init.d/S90usb-gadget" ]; then
+  clovershellActive || overmount "/etc/init.d/S92rndis" "/etc/init.d/S90usb-gadget"
+fi
+
+if [ "$cfg_wood" = "y" ]; then
+  if [ "$sftype" = "md" ]; then
+    killall syslogd
+    killall klogd
+  fi
 fi

@@ -108,6 +108,7 @@ flashBoot1(){
 }
 
 flashBoot2(){
+  ismdPartitioning && return 1
   flashBoot 2 30 ${1+"$@"}
 }
 
@@ -118,6 +119,7 @@ isOriginalBoot2(){
 }
 
 haveBackup2(){
+  ismdPartitioning && return 0
   validBoot2n 68
 }
 
@@ -131,6 +133,8 @@ backupBoot2(){
 }
 
 restoreBoot2(){
+  ismdPartitioning && return 0
+  isOriginalBoot2 && return 0
   haveBackup2 || return 1
   local bootimg="$temppath/boot.img"
   readBackup2 > "$bootimg" || return 1
@@ -142,10 +146,14 @@ installBoot2(){
   backupBoot2
   insertKeyFile "$1"
   if [ -d "$rootfs/boot" ]; then
-    copy "$1" "$rootfs/boot/"
-  else
-    flashBoot2 ${1+"$@"}
+    copy "$1" "$rootfs/boot/boot.img"
+    return $?
   fi
+  if [ -d "$installpath/boot" ]; then
+    copy "$1" "$installpath/boot/boot.img"
+    return $?
+  fi
+  flashBoot2 ${1+"$@"}
 }
 
 memboot(){
@@ -173,13 +181,10 @@ reboot_kexec(){
     shift
   else
     bootimg="$rootfs/boot/boot.img"
+    [ -f "$bootimg" ] || bootimg="$installpath/boot/boot.img"
     if [ ! -f "$bootimg" ]; then
       bootimg="$temppath/boot.img"
-      if isSdBoot; then
-        dd status=none "if=/dev/mmcblk0" of="$bootimg" bs=1K skip=20480 count=4096 || return 1
-      else
-        readBoot2 > "$bootimg" || return 1
-      fi
+      readBoot2 > "$bootimg" || return 1
     fi
   fi
   memboot "$bootimg" ${1+"$@"}
@@ -200,12 +205,14 @@ recovery(){
 }
 
 needKeyFile(){
+  return 1
   [ -z "$mountpoint" ] && return 1
   nandbUnlocked && return 1
   return 0
 }
 
 getBackup2(){
+  ismdPartitioning && return 1
   needKeyFile && return 1
   if haveBackup2; then
     readBackup2

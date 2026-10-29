@@ -6,7 +6,7 @@ init(){
   export modpath="/$modname"
   export mountpoint="/newroot"
   export temppath="/tmp"
-  export bootVersion="1.0.2"
+  export bootVersion="1.0.3"
 
   echo "$modname init script version: $bootVersion"
 

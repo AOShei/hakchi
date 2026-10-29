@@ -18,7 +18,7 @@ f_clovershell(){
 }
 
 f_shell(){
-  for s in $(ls /etc/init.d/S*); do
+  for s in $(ls /etc/init.d/S* | grep -Fv S99); do
     service "$(basename "$s")" start
   done
 }
@@ -31,28 +31,40 @@ f_uartshell(){
 }
 
 runshell(){
-  showDefaultImage
+  local cpufreq="/sys/devices/system/cpu/cpu0/cpufreq"
+  echo "600000" > "$cpufreq/scaling_max_freq"
+  unset cpufreq
+
   if [ "$cf_usb_mode" = "host" ]; then
     switchToUsbHost
-    timeout="" waittimeout 2000 'lsusb | grep -qFv "1d6b:"' "usbhost"
+    local usbdefstr='lsusb | grep -F "Bus 001" | grep -qFv "1d6b:"'
+    sntool ismd && usbdefstr='lsusb | grep -F "Bus 003" | grep -qFv "1d6b:"'
+    timeout="" waittimeout 5000 "$usbdefstr" "usbhost"
+
+    mount_base_ro
+    {
+      rm -f "/lib32/modules/$(uname -r)"
+      rm -f "/lib32/modules" "/usr" "/sbin"
+      for s in $(cat $rootfs/etc/bootcopy.d/* | sort -u); do
+        copy "$rootfs$s" "$s" --ignore-existing
+        copy "$squashfs$s" "$s" --ignore-existing
+      done
+      copy "$rootfs/lib/" "/lib32/" --ignore-existing
+      copy "$squashfs/lib/" "/lib32/" --ignore-existing --exclude "modules/"
+      copy "$squashfs/usr/lib/" "/usr/lib/" --ignore-existing
+      copy "$squashfs/sbin/" "/sbin/" --ignore-existing
+    } 2>/dev/null
+    umount_base
   else
     switchToUsbDevice
-    usleep 200000
+#    usleep 500000
+    {
+      rm -f "/lib32/modules/$(uname -r)"
+      rm -f "/lib32/modules"
+      copy "$rootfs/lib/" "/lib32/" --ignore-existing
+      copy "$mountpoint/lib/" "/lib32/" --ignore-existing --exclude "modules/"
+    } 2>/dev/null
   fi
-
-  mount_base_ro
-  {
-    rm -f "/lib32/modules" "/usr" "/sbin"
-    for s in $(cat $rootfs/etc/bootcopy.d/* | sort -u); do
-      copy "$rootfs$s" "$s" --ignore-existing
-      copy "$squashfs$s" "$s" --ignore-existing
-    done
-    copy "$rootfs/lib/" "/lib32/" --ignore-existing
-    copy "$squashfs/lib/" "/lib32/" --ignore-existing --exclude "modules/"
-    copy "$squashfs/usr/lib/" "/usr/lib/" --ignore-existing
-    copy "$squashfs/sbin/" "/sbin/" --ignore-existing
-  } 2>/dev/null
-  umount_base
 
   PATH="$modpath/shell:$PATH"
 
@@ -71,6 +83,8 @@ fi
   " > "/root/.shrc"
 
   ${1+"$@"}
+  showDefaultImage
+  loadModules
   sleep 1
   f_uartshell
 

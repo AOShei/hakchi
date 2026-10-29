@@ -1,24 +1,36 @@
 #!/bin/sh
 
 cd /bin
-busybox --list | busybox xargs -n1 busybox ln -ns "busybox" 2>/dev/null
+busybox --list | busybox xargs -n1 busybox ln -ns "busybox"
 cd /
 
 # devtmpfs does not get automounted for initramfs
 #mkdir -p /dev /proc /sys
 mount -t devtmpfs devtmpfs /dev
-exec 0</dev/console
-exec 1>/dev/console
-exec 2>/dev/console
+
+console="/dev/console"
+[ -f "/.debug" ] && console="/dev/tty0"
+exec 0<"$console"
+exec 1>"$console"
+exec 2>"$console"
+
+if [ -f "/.debug" ]; then
+  printf '\e[3J\e[1;32;40m'
+  decodepng "/hakchi/rootfs/etc/hakchi.png" > "/dev/fb0" &
+  usleep 100000
+  for i in . . .; do echo; done
+  echo 'DEBUG BUILD!'
+fi
+
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mkdir -p /dev/pts /dev/shm
 mount -o defaults,gid=5,mode=620 -t devpts devpts /dev/pts
 mount -o mode=077 -t tmpfs tmpfs /dev/shm
 
-keyfile="/key-file"
-echo "cmdline: $(cat "/proc/cmdline")"
+time -f 'nand init: %E' insmod "/lib/modules-ramfs/kernel/drivers/block/nand/nand.ko"
 
+keyfile="/key-file"
 for i in $(cat "/proc/cmdline"); do
   if [ "$i" = "ro" ]; then
     READONLY="y"
@@ -26,59 +38,20 @@ for i in $(cat "/proc/cmdline"); do
     ROOTFS="${i#root=}"
   elif [ "$i" = "decrypt" ]; then
     DECRYPT="y"
-  elif [ "$i" = "sdboot" ]; then
-    SD="y"
-  elif [ "${i#waitfor=}" != "$i" ]; then
-    WAITFOR="${i#waitfor=}"
   elif [ "${i#hakchi-key-file=base64:}" != "$i" ]; then
     echo "${i#hakchi-key-file=base64:}" | base64 -d >"$keyfile"
   fi
 done
 
-if [ ! -z "$WAITFOR" ]; then
-  while true; do
-    [ -b "$WAITFOR" ] && break || usleep 100000
-  done
-elif grep -qEe 'hakchi-((clover)?shell|memboot)' /proc/cmdline; then
-  usleep 500000
-  if [ -b /dev/mmcblk0 ] && [ "$(head -c6 /dev/mmcblk0)" == "hakchi" ]; then
-    SD="y"
-  fi
-fi
+isSquashfs(){
+  [ -b "$1" ] || return 1
+  [ "$(hexdump -e '1/4 "%u"' -s 0 -n 4 "$1")" = "1936814952" ] && return 0
+  return 1
+}
 
-if [ "$SD" = "y" ] && [ "$(head -c6 /dev/mmcblk0)" == "hakchi" ]; then
-  if [ ! -b /dev/mmcblk0p2 ]; then
-    mkdir /squashtools
-    losetup -o $((1024*40)) /dev/loop1 /dev/mmcblk0
-    mount /dev/loop1 /squashtools
-    mkdir /tmp
-    cp /squashtools/init /tmp/init
-    sh /tmp/init 2>&1 | tee /dev/tty0
-    rm /tmp/init
-    rmdir /tmp
-  fi
+isSquashfs "${ROOTFS}" && DECRYPT="n"
 
-  mkdir /firmware
-  mount -t vfat -o ro /dev/mmcblk0p1 /firmware
-  firmware="$(find /firmware -type f -name "*.hsqs" | sort | grep -vEe '/\._' | head -n1)"
-  
-  if [ -f "$firmware" ]; then
-    losetup /dev/loop2 "$firmware" 
-    ROOTFS="/dev/loop2"
-  else
-    ROOTFS="/dev/nandb"
-    umount /firmware
-    rmdir /firmware
-  fi
-fi
-
-while true; do
-  [ -b "$ROOTFS" ] && break || usleep 100000
-done
-
-[ "$(hexdump -e '1/4 "%u"' -s 0 -n 4 "$ROOTFS")" == "1936814952" ] && DECRYPT="n" || DECRYPT="y"
-
-if [ "${DECRYPT}" = "y" ] && [ ! -f "$keyfile" ]; then
+if ! [ -f "$keyfile" ] && [ "$DECRYPT" = "y" ]; then
   kfb64="$(sunxi-flash cmdline | sed -ne 's/.*hakchi-key-file=base64:\([^ ]*\).*/\1/p')" && ! [ -z "$kfb64" ] && echo "$kfb64" | base64 -d >"$keyfile"
   unset kfb64
   [ -f "$keyfile" ] || sunxi-flash ramdisk 68 | cpio -iu "$(basename "$keyfile")" 2>/dev/null
@@ -94,15 +67,29 @@ MOUNT_OPTS="noatime"
 if [ "${DECRYPT}" = "y" ]; then
   [ "${READONLY}" = "y" ] && READONLY="--readonly"
   [ -f "$keyfile" ] && cryptsetup open "${ROOTFS}" root-crypt "${READONLY}" --type plain --cipher aes-xts-plain --key-file "$keyfile"
-  ROOTFS="/dev/mapper/root-crypt"
+  if isSquashfs "/dev/mapper/root-crypt"; then
+    ROOTFS="/dev/mapper/root-crypt"
+  else
+    ROOTFS="/dev/none"
+    [ -f "$keyfile" ] && cryptsetup close root-crypt
+  fi
 fi
 
 mountpoint="/newroot"
 mkdir -p "$mountpoint"
-[ -b "${ROOTFS}" ] && mount -o "${MOUNT_OPTS}" "${ROOTFS}" "$mountpoint"
+isSquashfs "${ROOTFS}" && mount -o "${MOUNT_OPTS}" "${ROOTFS}" "$mountpoint"
 
-[ -f "/hakchi/init" ] && sh "/hakchi/init"
+# SEGA
+if ! mountpoint -q "$mountpoint"; then
+  mount -o ro,noatime "/dev/nandd" "$mountpoint"
+  [ -f "$mountpoint/etc/init.d/moon-game" ] || umount "$mountpoint"
+fi
 
+[ -f "/hakchi/init" ] && time -f 'preinit: %E' sh "/hakchi/init"
+
+exec 0</dev/console
+exec 1>/dev/console
+exec 2>/dev/console
 mount --move /dev "$mountpoint/dev"
 mount --move /proc "$mountpoint/proc"
 mount --move /sys "$mountpoint/sys"

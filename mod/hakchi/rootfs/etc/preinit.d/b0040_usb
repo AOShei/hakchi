@@ -10,12 +10,14 @@ setSysNode(){
 
 disableUsbGadget(){
   [ "$(usbMode)" = "device" ] || return 0
+#  echo "disabling usb gadget"
   setSysNode "/sys/devices/virtual/android_usb/android0/enable" 0
 }
 
 disableUsbDevice(){
   disableUsbGadget
   #disable usb
+#  echo "switching usb off"
   setSysNode "/sys/devices/sunxi_usb/usb_role" 0
 }
 
@@ -23,6 +25,7 @@ switchToUsbDevice(){
   [ "$(usbMode)" = "device" ] && return 0
   disableUsbDevice || return 1
   # enable device mode
+#  echo "switching to usb device mode"
   setSysNode "/sys/devices/sunxi_usb/usb_role" 2 || return 1
   # make sure the usb gadgets are disabled
   disableUsbGadget
@@ -32,13 +35,16 @@ switchToUsbHost(){
   [ "$(usbMode)" = "host" ] && return 0
   disableUsbDevice || return 1
   # enable host mode
+#  echo "switching to usb host mode"
   setSysNode "/sys/devices/sunxi_usb/usb_role" 1
 }
 
 switchToUsbOTG(){
   switchToUsbHost
   # the usb driver needs some time to initialize
-  if ! timeout="" waittimeout 800 'lsusb | grep -qFv "1d6b:"' "usbhost"; then
+  local usbdefstr='lsusb | grep -F "Bus 001" | grep -qFv "1d6b:"'
+  sntool ismd && usbdefstr='lsusb | grep -F "Bus 003" | grep -qFv "1d6b:"'
+  if ! timeout="" waittimeout 800 "$usbdefstr" "usbhost"; then
     switchToUsbDevice
   fi
 }
@@ -54,6 +60,12 @@ usbMode(){
     2) echo "device";;
     *) echo "idk";;
   esac
+}
+
+haveUsbBus(){
+  [ "$(usbMode)" = "host" ] && return 0
+  lsusb | grep -qF "Bus 002" && return 0
+  return 1
 }
 
 getUsbStorageIds(){
@@ -141,7 +153,7 @@ checkExtStorage(){
   local p
   local blockDevice="/dev/sd"
 
-  if [ "$(usbMode)" = "host" ] && waittimeout 700 '! [ -z "$(getUsbStorageIds)" ]' "usb storage"; then
+  if haveUsbBus && waittimeout 700 '! [ -z "$(getUsbStorageIds)" ]' "usb storage"; then
     waitForStorageDevice "${blockDevice}a"
     checkStorageDevice "${blockDevice}a" && return 0
     for di in $(seq 97 99); do
@@ -153,8 +165,6 @@ checkExtStorage(){
       done
     done
   fi
-
-  isSdBoot && return 1
 
   [ "$timeout" -lt "3000" ] || timeout="3000"
   if mmcUsed && waittimeout timeout 'ls "/sys/block" | grep -qF "mmc"' "sd card"; then

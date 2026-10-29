@@ -8,16 +8,6 @@ Special thanks to all of the contributors including: $(shuf /etc/contributors | 
 " | fold -s
 }
 
-grabSquashfsLibs(){
-  copy "$mountpoint/lib/" "/lib32/" --ignore-existing --exclude "modules/"
-  [ -d "/lib32/modules" ] || ln -nsf -T "$rootfs/lib/modules" "/lib32/modules"
-}
-
-isSdBoot(){
-  [ -b "/dev/mmcblk0" ] && [ "$(head -c 6 "/dev/mmcblk0")" == "hakchi" ] && return 0
-  return 1
-}
-
 squashDevice(){
   echo "$(mount | grep -F "$squashfs" | head -n1 | awk '{print $1}')"
 }
@@ -41,18 +31,20 @@ mountSquash(){
   umountSquash || return 1
   mountpoint -q "$mountpoint" || return 1
   mkdir -p "$squashfs"
+  mount | grep -qE 'rootfs on .* type overlayfs' && umount "$mountpoint"
   mount -o bind,ro "$mountpoint" "$squashfs" || return 1
-  grabSquashfsLibs; return 0
 }
 
 mount_base(){
-  local dataPartition="/dev/nandc"
-  [ "$1" != "nand" ] && isSdBoot && dataPartition="/dev/mmcblk0p2"
   mkdir -p "$mountpoint/var"
   mountpoint -q "$mountpoint/var" || mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$mountpoint/var" || return 1
   mountSquash
   mkdir -p "$mountpoint/var/lib"
-  mountpoint -q "$mountpoint/var/lib" || mount -o defaults,nosuid,nodev,noatime "$dataPartition" "$mountpoint/var/lib"
+  mountpoint -q "$mountpoint/var/lib" || mount -o defaults,nosuid,nodev,noatime "/dev/nandc" "$mountpoint/var/lib"
+  if [ -f "$mountpoint/var/lib/uImage" ]; then
+    umount_if "$mountpoint/var/lib"
+    mount -o defaults,nosuid,nodev,noatime "/dev/nande" "$mountpoint/var/lib"
+  fi
 }
 
 mount_base_ro(){
@@ -61,6 +53,10 @@ mount_base_ro(){
   mountSquash
   mkdir -p "$mountpoint/var/lib"
   mountpoint -q "$mountpoint/var/lib" || mount -o defaults,nosuid,nodev,noatime,ro "/dev/nandc" "$mountpoint/var/lib"
+  if [ -f "$mountpoint/var/lib/uImage" ]; then
+    umount_if "$mountpoint/var/lib"
+    mount -o defaults,nosuid,nodev,noatime,ro "/dev/nande" "$mountpoint/var/lib"
+  fi
 }
 
 umount_base(){
@@ -68,6 +64,16 @@ umount_base(){
   umountSquash
   umount_if "$mountpoint/var/lib"
   umount_if "$mountpoint/var"
+}
+
+reload_nand(){
+  local mnand="/lib/modules-ramfs/kernel/drivers/block/nand/nand.ko"
+  [ -f "$mnand" ] || return 1
+  umount_base
+  umount_if "$mountpoint"
+  [ -b "/dev/mapper/root-crypt" ] && cryptsetup close root-crypt
+  rmmod nand || return 1
+  insmod "$mnand"
 }
 
 remove_old(){
@@ -84,7 +90,7 @@ mod_repair_etc(){
   local etc="$temppath/etc"
   rm -rf "$etc"
   mkdir -p "$etc"
-  copy "$mountpoint/etc/" "$etc/"
+#  copy "$mountpoint/etc/" "$etc/"
   if [ "$1" == "full" ]; then
     rm -f "$modpath/rootfs/etc/preinit.d/p0000_config"
     copy "$modpath/rootfs/etc/" "$etc/"
@@ -94,10 +100,6 @@ mod_repair_etc(){
   copy "$etc/" "$rootfs/etc/"
   rm -rf "$etc"
   mkdir -p "$rootfs/root"
-}
-
-mod_repair_modules(){
-  [ -d "$mountpoint/lib/modules/$(uname -r)" ] && restore "/lib/modules/$(uname -r)/"
 }
 
 mount_move(){
@@ -148,10 +150,6 @@ nandbUnlocked(){
 }
 
 currentFirmware(){
-  if isSdBoot && mount | grep -q "loop2 on /newroot "; then
-    echo "_nand_"
-    return 0
-  fi
   local firmware="$(losetup -a | grep -F "$(squashDevice)" | head -n1 | awk '{print $3}')"
   if ! [ -z "$firmware" ]; then
     local fdir="$(dirname "$firmware")"
@@ -164,18 +162,11 @@ currentFirmware(){
     echo "_nand_"
     return 0
   fi
-  return 1
-}
-
-overmountModules(){
-  if [ ! -d "$mountpoint/lib/modules/$(uname -r)" ]; then
-    if [ -d "$rootfs/lib/modules/$(uname -r)" ]; then
-      overmount "/lib/modules"
-    else
-      echo "no modules for loaded kernel $(uname -r)"
-      [ -d "$transferpath" ] || bootBackup2
-    fi
+  if squashDevice | grep -qF "/dev/nand"; then
+    echo "_nand_"
+    return 0
   fi
+  return 1
 }
 
 loadFirmware(){
@@ -193,12 +184,10 @@ loadFirmware(){
   fi
   checkFirmware "$firmware" || return 0
 
-  mod_repair_modules
   umountSquash
   remount_root "$firmware"
   [ -b "/dev/mapper/root-crypt" ] && cryptsetup close root-crypt
   mountSquash
-  overmountModules
 }
 
 shutdown(){
@@ -206,17 +195,18 @@ shutdown(){
   sync
   cd /
   umount -a -r 2>/dev/null
+  umount -a -r 2>/dev/null
   poweroff -f
   while :;do sleep 1;:;done
 }
 
 reboot(){
   echo "Restarting system."
-  reboot_kexec
+#  reboot_kexec
   sync
   cd /
   umount -a -r 2>/dev/null
-  /bin/reboot -f
+  /bin/busybox reboot -f
   while :;do sleep 1;:;done
 }
 
@@ -298,6 +288,7 @@ linkGames(){
   local games="$mountpoint/media/$modname/games${1##$installpath/games}"
   [ -d "$games" ] || games="$installpath/games${1##$rootfs$gamepath}"
   [ -d "$games" ] || games="$1"
+  [ -d "$games" ] || return 0
   games="${games##$mountpoint}"
   rm -f "$mountpoint/var/games"
   ln -nsf -T "$games" "$mountpoint/var/games"
@@ -305,29 +296,44 @@ linkGames(){
 }
 
 softwareCheck(){
-  [ -d "$squashfs/etc/clover" ] || return 1
-  sftype="nes"
-  sfregion="usa"
-  [ "$(cat "$squashfs/etc/clover/boardtype")" == "dp-shvc" ] && sftype="snes"
-  grep -qF "dp-hvcj" "$squashfs/etc/issue" && sftype="hvcj"
-  [ "$(cat "$squashfs/etc/clover/REGION")" == "JPN" ] && sfregion="jpn"
-  [ "$(cat "$squashfs/etc/clover/REGION")" == "EUR" ] && sfregion="eur"
+  sftype=""
+  sfregion=""
 
-  local feck="$mountpoint$profilepath/home-menu/save/system-save.json"
-  if ! [ "$sftype" = "nes" ]; then
-    gamepath="/usr/share/games"
-    [ -f "$feck" ] && mv -f "$feck" "$feck.nes"
-    [ -d "$feck.snes" ] && rm -rf "$feck" && mv "$feck.snes" "$feck"
-  else
-    gamepath="/usr/share/games/nes/kachikachi"
-    [ -d "$feck" ] && rm -rf "$feck.snes" && mv "$feck" "$feck.snes"
-    [ -f "$feck.nes" ] && mv -f "$feck.nes" "$feck"
+  if [ -d "$squashfs/etc/clover" ]; then
+    sftype="nes"
+    sfregion="usa"
+    [ "$(cat "$squashfs/etc/clover/boardtype")" == "dp-shvc" ] && sftype="snes"
+    grep -qF "dp-hvcj" "$squashfs/etc/issue" && sftype="hvcj"
+    [ "$(cat "$squashfs/etc/clover/REGION")" == "JPN" ] && sfregion="jpn"
+    [ "$(cat "$squashfs/etc/clover/REGION")" == "EUR" ] && sfregion="eur"
+
+    local feck="$mountpoint$profilepath/home-menu/save/system-save.json"
+    if ! [ "$sftype" = "nes" ]; then
+      gamepath="/usr/share/games"
+      [ -f "$feck" ] && mv -f "$feck" "$feck.nes"
+      [ -d "$feck.snes" ] && rm -rf "$feck" && mv "$feck.snes" "$feck"
+    else
+      gamepath="/usr/share/games/nes/kachikachi"
+      [ -d "$feck" ] && rm -rf "$feck.snes" && mv "$feck" "$feck.snes"
+      [ -f "$feck.nes" ] && mv -f "$feck.nes" "$feck"
+    fi
+  fi
+
+  if [ -f "$squashfs/usr/game/version" ]; then
+    sftype="md"
+    sfregion="usa"
+    local ver="$(cat "$squashfs/usr/game/version")"
+    ver="${ver:4:2}"
+    [ "$ver" = "JP" ] && sfregion="jpn"
+    [ "$ver" = "EU" ] && sfregion="eur"
+    [ "$ver" = "AS" ] && sfregion="asia"
   fi
 
   mountpoint -q "$mountpoint/var/lib" || return 0
   mkdir -p "$mountpoint$profilepath/$modname"
 
   rm -f "$mountpoint/var/saves"
+  mkdir -p "$mountpoint$profilepath"
   ln -nsf -T "$profilepath" "$mountpoint/var/saves"
 }
 
@@ -368,6 +374,12 @@ findGameStorage(){
   return 1
 }
 
+bind_games(){
+  [ -z "$gamepath" ] && return 0
+  mount_bind "$1" "$2" || return 1
+  repair_fonts "$1"
+}
+
 overmount_games(){
   local gameStorage="$(findGameStorage)" || return 0
   local state_path="$mountpoint$profilepath/$modname"
@@ -381,8 +393,7 @@ overmount_games(){
   fi
   echo "menu code: $menu_code"
   if containsGames "$gameStorage/$menu_code"; then
-    mount_bind "$gameStorage/$menu_code" "$mountpoint/$gamepath" && \
-    repair_fonts "$gameStorage/$menu_code" && \
+    bind_games "$gameStorage/$menu_code" "$mountpoint/$gamepath" && \
     linkGames "$gameStorage/$menu_code" && \
     return 0
   else
@@ -403,24 +414,35 @@ uikill(){
 
 uistop(){
   killall -s KILL clover-mcp 1>/dev/null 2>&1
+  sh "/etc/init.d/S99first_startup" stop 1>/dev/null 2>&1
   uikill TERM
 }
 
 uistart(){
   uistop
-  sh "/etc/init.d/S81clover-mcp" start
+  if [ -f "$squashfs/usr/game/m2engage" ]; then
+    sh "/etc/init.d/S99first_startup" start
+  else
+    sh "/etc/init.d/S81clover-mcp" start
+  fi
 }
 
 uipause(){
+  killall -s STOP m2engage 1>/dev/null 2>&1
   uikill STOP
 }
 
 uiresume(){
   uikill CONT
+  killall -s CONT m2engage 1>/dev/null 2>&1
 }
 
 gameover(){
-  poweroff
+  if sntool isRecovery; then
+    shutdown
+  else
+    poweroff
+  fi
 }
 
 printSoftwareInfo(){
@@ -447,6 +469,7 @@ waitTask(){
 
 showImage(){
   local image="$(eval echo "$1")"
+  [ -f "/.debug" ] && return 0
   [ -f "$image" ] || image="$rootfs$1"
   [ -f "$image" ] || image="$squashfs$1"
   [ -f "$image" ] || return 1
@@ -568,7 +591,6 @@ hwid(){
 }
 
 mmcUsed(){
-  isSdBoot && return 0
   getScript | grep -qF 'sdc_used = 1'
 }
 
@@ -631,4 +653,28 @@ waittimeout(){
   done
   [ ! -z "$3" ] && [ "$wasted" -gt "0" ] && [ "$cfg_wood" = "y" ] && echo "wasted ${wasted}ms waiting for $3"
   eval "$2"
+}
+
+ismdPartitioning(){
+  sntool ismd && return 0
+  sunxi-part | grep -qF 'boot-res'
+}
+
+linkModules(){
+  local mod="lib/modules/$(uname -r)"
+#  [ -d "/$mod" ] && return 0
+  mkdir -p "$(dirname "$mod")"
+  [ -d "$rootfs/$mod" ] && ln -nsf -T "$rootfs/$mod" "/$mod" && return 0
+  [ -d "$squashfs/$mod" ] && ln -nsf -T "$squashfs/$mod" "/$mod" && return 0
+  [ -d "$mountpoint/$mod" ] && ln -nsf -T "$mountpoint/$mod" "/$mod" && return 0
+  ln -nsf -T "/lib/modules-ramfs" "/$mod"
+  [ -d "/$mod" ]
+}
+
+loadModules(){
+  linkModules || return 1
+  local m
+  for m in mali sd_mod usb_storage overlayfs evdev gpio_keys; do
+    modprobe -q "$m"
+  done 
 }
