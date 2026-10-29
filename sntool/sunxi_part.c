@@ -445,6 +445,103 @@ static int writeInfo(int fd,struct sp_area*a,const uint8_t*info)
 }
 
 // #########################################################################
+// sunxi-flash burn_boot1 with "default" as input (hakchi's uninstall): Nintendo's u-boot back in
+// every copy, laid out as on a console from the factory, as the shipped sntool does it.
+
+#define SP_BOOT1_SUM_SEED 0x5f0a6c39u//the boot1 header's checksum field while summing
+
+int sp_restoreStockUboot(int fd)
+{
+    struct sp_area a;
+    int ret=1;
+    if(readArea(fd,&a))
+    {
+        freeArea(&a);
+        return 1;
+    }
+    // Nintendo's u-boot: the copies hakchi does not write (the second half), with the factory
+    // layout. The current layout: the first copy.
+    const struct sp_copy*stock=0;
+    for(uint32_t c=a.copies/2;(c<a.copies)&&!stock;++c)
+        if(a.copy[c].valid&&isFactory(&a.copy[c].layout,find(&a.copy[c].layout,"data")))
+            stock=&a.copy[c];
+    if(!stock||!a.copy[0].valid)
+    {
+        sp_error("no %s u-boot copy to restore from\n",stock?"valid first":"factory");
+        freeArea(&a);
+        return 1;
+    }
+    const uint8_t*src=stock->image;
+    const uint32_t infoOffs=rd32(src+0x14);
+    const uint32_t scriptOffs=rd32(src+0x18);
+    if((scriptOffs==0)||(scriptOffs>=infoOffs)||(infoOffs!=a.info_offs))
+    {
+        sp_error("unexpected u-boot header\n");
+        freeArea(&a);
+        return 1;
+    }
+    // u-boot and its script without their 0xff padding, joined again as sntool's join does:
+    // u-boot padded to 64 KiB, the script to 8 KiB, then the boot-info.
+    uint32_t ubootLen=scriptOffs,scriptLen=infoOffs-scriptOffs;
+    while((ubootLen>0)&&(src[ubootLen-1]==0xff))
+        --ubootLen;
+    while((scriptLen>0)&&(src[scriptOffs+scriptLen-1]==0xff))
+        --scriptLen;
+    const uint32_t scriptAt=(ubootLen+0xffffu)&~0xffffu;
+    const uint32_t infoAt=(scriptAt+scriptLen+0x1fffu)&~0x1fffu;
+    const uint32_t per=(infoAt+SP_INFO_SIZE+SP_BLOCK-1)/SP_BLOCK;
+    uint8_t*copy[2]={calloc(per,SP_BLOCK),calloc(per,SP_BLOCK)};
+    uint8_t*area=malloc(SP_AREA_BLOCKS*SP_BLOCK);
+    uint8_t*check=malloc(SP_BLOCK);
+    if(copy[0]&&copy[1]&&area&&check)
+    {
+        for(int k=0;k<2;++k)
+        {
+            uint8_t*img=copy[k];
+            memset(img,0xff,per*SP_BLOCK);
+            memcpy(img,src,ubootLen);
+            memcpy(img+scriptAt,src+scriptOffs,scriptLen);
+            wr32(img+0x18,scriptAt);
+            wr32(img+0x14,infoAt);
+            wr32(img+0x0c,SP_BOOT1_SUM_SEED);
+            uint32_t sum=0;
+            for(uint32_t i=0;i<infoAt;i+=4)
+                sum+=rd32(img+i);
+            wr32(img+0x0c,sum);
+            // The current layout in the first two copies, the factory one in the others.
+            memcpy(img+infoAt,k?(stock->image+a.info_offs):(a.copy[0].image+a.info_offs),SP_INFO_SIZE);
+        }
+        // Copy after copy through the whole area; the last one as far as it fits.
+        for(uint32_t i=0;i<SP_AREA_BLOCKS;++i)
+            memcpy(area+i*SP_BLOCK,copy[(i/per)<2?0:1]+(i%per)*SP_BLOCK,SP_BLOCK);
+        uint32_t written=0;
+        ret=0;
+        for(uint32_t i=0;(i<SP_AREA_BLOCKS)&&(ret==0);++i)
+        {
+            const uint8_t*block=area+i*SP_BLOCK;
+            uint32_t bad=0;
+            if(memcmp(block,a.raw+i*SP_BLOCK,SP_BLOCK)==0)
+                continue;
+            if((phyBlock(fd,sp_ioctl_write,SP_FIRST_BLOCK+i,(uint8_t*)block,&bad)<0)||(bad>0)||
+                (phyBlock(fd,sp_ioctl_read,SP_FIRST_BLOCK+i,check,&bad)<0)||(bad>0)||memcmp(check,block,SP_BLOCK))
+            {
+                sp_error("nand write failed at block %x\n",SP_FIRST_BLOCK+i);
+                ret=1;
+            }
+            else
+                ++written;
+        }
+        fprintf(stdout,"nand sectors written: %u\n",written);
+    }
+    free(copy[0]);
+    free(copy[1]);
+    free(area);
+    free(check);
+    freeArea(&a);
+    return ret;
+}
+
+// #########################################################################
 
 static int debug=0;
 

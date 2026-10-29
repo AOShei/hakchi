@@ -50,5 +50,7 @@ int sp_equal(const struct sp_layout*a,const struct sp_layout*b);
 int sp_isRecovery(void);
 int sp_ismd(void);
 int sunxi_part(int argc,const char*argv[]);
+// burn_boot1 "default": Nintendo's u-boot back in every copy (fd: /dev/nanda). 0 if done.
+int sp_restoreStockUboot(int fd);
 
 #endif

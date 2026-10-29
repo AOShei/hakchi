@@ -708,6 +708,7 @@ int sunxi_flash_ioctl(uint32_t cmd,uint32_t offs,uint32_t size,FILE*f)
     bcinit(&b);
     uint32_t ubcsum=0;
     uint32_t sectorsWritten=0;
+    uint32_t sectorsRead=0;
     if(dir)
     {
         size=size?:((size_t)-1);
@@ -737,9 +738,54 @@ int sunxi_flash_ioctl(uint32_t cmd,uint32_t offs,uint32_t size,FILE*f)
                 if(feof(f))
                     break;
                 part=fread(buffer,1,sector_size,f);
-                if((part<sector_size)&&(iocmd==ioctl_write))
+                if((cmd==burn_boot1)&&(sectorsRead==0)&&(part>=7)&&(memcmp(buffer,"default",7)==0))
+                {
+                    // hakchi's uninstall: Nintendo's u-boot back (sunxi_part.c).
+                    ret=sp_restoreStockUboot(fd);
+                    break;
+                }
+                if((cmd==burn_boot1)&&(sectorsRead++==0))
+                {
+                    // Only a u-boot image, and no more of it than its header's length: what
+                    // follows it in a copy is the boot-info, then the next copy.
+                    const uint32_t ubootLen=(part>=0x18)?(buffer[0x14]|(buffer[0x15]<<8)|
+                        (buffer[0x16]<<16)|((uint32_t)buffer[0x17]<<24)):0;
+                    if((part<0x18)||memcmp(buffer+4,"uboot\0\0\0",8)||(ubootLen==0)||(ubootLen>7*sector_size))
+                    {
+                        error_printf("not a u-boot image, not writing it\n");
+                        ret=1;
+                        break;
+                    }
+                    if(size>ubootLen)
+                        size=ubootLen;
+                }
+                if((cmd==burn_boot1)&&(part>size))
+                    part=size;
+                if((part<sector_size)&&(iocmd==ioctl_write)&&(cmd!=burn_boot1))
                     while(part<sector_size)
                         buffer[part++]=0xff;
+                if((part<sector_size)&&(iocmd==ioctl_write))
+                {
+                    // u-boot (0xba000 bytes) ends inside a block whose tail is the NAND driver's
+                    // boot-info, the partition layout: the rest of that block stays as it is on
+                    // the NAND. Erased (0xff) only if the block cannot be read.
+                    uint8_t keep[sector_size];
+                    data.buffer=keep;
+                    data.length=sector_size;
+                    data.offset=offs;
+                    data.flags=0;
+                    data.in.raw=1;
+                    const int kept=(ioctl(fd,ioctl_read,&data)>=0)&&(data.badblocks==0);
+                    data.buffer=buffer;
+                    data.badblocks=0;
+                    while(part<sector_size)
+                    {
+                        buffer[part]=kept?keep[part]:0xff;
+                        ++part;
+                    }
+                    if(!kept)
+                        error_printf("nand read failed at block %x, the end of the block is erased\n",offs/sector_size);
+                }
             }
             int needwrite=1;
             if(!forced)
