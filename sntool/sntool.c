@@ -14,6 +14,7 @@
 #ifndef _WIN32
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #endif
 #include <bootimg.h>
 #include <include/portable_endian.h>
@@ -1107,10 +1108,30 @@ int devmem(uint32_t write,uint32_t offs,uint32_t size,const char*fileName)
 
 // #########################################################################
 
+#ifndef _WIN32
+// Started as clover-mcp (hakchi's rootfs links /usr/bin/clover-mcp to sntool): Nintendo's
+// clover-mcp, which starts the menu, at the priority hakchi gives it. hakchi's sntool also ran a
+// USB gamepad driver beside it here; this one does not.
+int cloverMcp(const char*argv[])
+{
+    const char*mcp="/var/squashfs/usr/bin/clover-mcp";
+    sync();
+    if(setpriority(PRIO_PROCESS,0,-15)<0)
+        error_printf("clover-mcp: setpriority: %s\n",strerror(errno));
+    execv(mcp,(char*const*)argv);
+    error_printf("clover-mcp: cannot start %s: %s\n",mcp,strerror(errno));
+    return 1;
+}
+#endif
+
 int main(int argc,const char*argv[])
 {
     int ret=0;
     argv[0]=basename(argv[0]);
+#ifndef _WIN32
+    if(strcmp(argv[0],"clover-mcp")==0)
+        return cloverMcp(argv);
+#endif
     for(int i=0;i<argc;++i)
     {
         if(strcmp(argv[i],"sntool")==0)
